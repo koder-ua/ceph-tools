@@ -1,0 +1,15 @@
+digraph "ceph_request" {
+    initiated -> queued_for_pg  [label="data read from socket and put info queue"];
+    queued_for_pg -> reached_pg [label="op fetched from queue"];
+    reached_pg -> started [labe="op get all locks and processing started"];
+    started -> "waiting for subops from 1,2" [label="request to replica is send"];
+    "waiting for subops from 1,2" -> commit_queued_for_journal_write [label="???"];
+    "waiting for subops from 1,2" -> "sub_op_commit_rec from 1" [label="replica 1 done"];
+    "waiting for subops from 1,2" -> "sub_op_commit_rec from 2" [label="replica 2 done"];
+    commit_queued_for_journal_write -> write_thread_in_journal_buffer;
+    write_thread_in_journal_buffer -> journaled_completion_queued;
+    journaled_completion_queued -> commit_sent;
+    commit_sent -> op_commit [label="???"];
+    op_commit -> op_applied [label="data written to main storage buffer"];
+    op_applied -> done [label="data written(commited to disk?) to main storage?"];
+}
