@@ -5,13 +5,15 @@ import os
 import sys
 import json
 import shutil
+import logging
 import argparse
 import tempfile
-import subprocess
 import collections
 
+from common import run, setup_loggers
+from common import logger as clogger
 
-MORE_LOGS = False
+logger = logging.getLogger("remap")
 
 
 class PGInfo:
@@ -41,27 +43,6 @@ class OSDChanges:
         self.pg_out = 0
         self.bytes_in = 0
         self.bytes_out = 0
-
-
-def run(cmd, *args, **kwargs):
-    if args or kwargs:
-        cmd = cmd.format(*args, **kwargs)
-
-    if MORE_LOGS:
-        print(">>>>", cmd)
-
-    p = subprocess.Popen(cmd,
-                         shell=True,
-                         stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE)
-
-    stdout, stderr = p.communicate()
-    assert p.returncode == 0, "{0!r} failed with code {1}. Stdout\n{2}\nstderr {3}"\
-        .format(cmd, p.returncode, stdout, stderr)
-
-    if sys.version_info.major == 3:
-        return stdout.decode('utf8'), stderr.decode('utf8')
-    return stdout
 
 
 def calc_diff(p_old, p_new):
@@ -211,8 +192,8 @@ def b2ssize(value):
 def main(argv):
     opts = parse_args(argv[1:])
 
-    global MORE_LOGS
-    MORE_LOGS = opts.verbose
+    default_level = logging.DEBUG if opts.verbose else logging.WARNING
+    setup_loggers([clogger, logger], default_level=default_level)
 
     if opts.subparser_name == 'dump':
         crush_map_f = tmpnam()
@@ -242,7 +223,7 @@ def main(argv):
         run("crushtool -d {0} -o {1}", crush_map_f, crush_map_txt_f)
         run("{0} {1}", opts.editor, crush_map_txt_f)
 
-        print("Press enter, when done")
+        logger.info("Press enter, when done")
         sys.stdin.readline()
 
     run("crushtool -c {0} -o {1}", crush_map_txt_f, crush_map_f)
@@ -251,8 +232,7 @@ def main(argv):
         # don't change original osd map file
         osd_map_new_f = tmpnam()
         shutil.copy(osd_map_f, osd_map_new_f)
-        if MORE_LOGS:
-            print(">>>> Copy {0} => {1}".format(osd_map_f, osd_map_new_f))
+        logger.debug("Copy {0} => {1}".format(osd_map_f, osd_map_new_f))
     else:
         osd_map_new_f = osd_map_f
 
