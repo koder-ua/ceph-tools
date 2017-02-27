@@ -7,10 +7,9 @@ import json
 import shutil
 import logging
 import argparse
-import tempfile
 import collections
 
-from common import run, setup_loggers
+from common import run, setup_loggers, tmpnam, b2ssize
 from common import logger as clogger
 
 logger = logging.getLogger("remap")
@@ -156,37 +155,19 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
-FILES_TO_REMOVE = []
-def tmpnam():
-    fd, name = tempfile.mkstemp()
-    os.close(fd)
-    FILES_TO_REMOVE.append(name)
-    return name
 
+def calculate_remap(curr_map_f, new_map_f, pg_dump_f=None):
+    curr_distr = run("osdmaptool --test-map-pgs-dump {0}", curr_map_f)
+    curr_pools = {pool.pid: pool for pool in parse(curr_distr)}
 
-RSMAP = [('K', 1024),
-         ('M', 1024 ** 2),
-         ('G', 1024 ** 3),
-         ('T', 1024 ** 4)]
+    new_distr = run("osdmaptool --test-map-pgs-dump {0}", new_map_f)
+    new_pools = {pool.pid: pool for pool in parse(new_distr)}
 
+    pool_pairs = {pool.pid: (curr_pools[pool.pid], pool) for pool in new_pools.values()}
+    pg_dump_js = open(pg_dump_f).read() if pg_dump_f else None
+    pg_sizes = get_pg_sizes(pg_dump_js)
 
-def b2ssize(value):
-    value = int(value)
-    if value < 1024:
-        return str(value) + " "
-
-    # make mypy happy
-    scale = 1
-    name = ""
-
-    for name, scale in RSMAP:
-        if value < 1024 * scale:
-            if value % scale == 0:
-                return "{0} {1}i".format(value // scale, name)
-            else:
-                return "{0:.1f} {1}i".format(float(value) / scale, name)
-
-    return "{0}{1}i".format(value // scale, name)
+    return get_osd_diff(pool_pairs, pg_sizes)
 
 
 def main(argv):
@@ -236,18 +217,9 @@ def main(argv):
     else:
         osd_map_new_f = osd_map_f
 
-    curr_distr = run("osdmaptool --test-map-pgs-dump {0}", osd_map_f)
-    curr_pools = {pool.pid: pool for pool in parse(curr_distr)}
-
     run("osdmaptool --import-crush {0} {1}", crush_map_f, osd_map_new_f)
 
-    new_distr = run("osdmaptool --test-map-pgs-dump {0}", osd_map_new_f)
-    new_pools = {pool.pid: pool for pool in parse(new_distr)}
-
-    pool_pairs = {pool.pid: (curr_pools[pool.pid], pool) for pool in new_pools.values()}
-    pg_sizes = get_pg_sizes(open(opts.pg_dump).read())
-
-    osd_changes = get_osd_diff(pool_pairs, pg_sizes)
+    osd_changes = calculate_remap(osd_map_f, osd_map_new_f, opts.pg_dump)
 
     total_send = 0
     total_moved_pg = 0
@@ -267,7 +239,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv))
-    finally:
-        map(os.unlink, FILES_TO_REMOVE)
+    sys.exit(main(sys.argv))

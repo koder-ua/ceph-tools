@@ -5,12 +5,12 @@ osds:
   - osd: osd.0
     root: default
     host: osd-0
-    weight: 0.3
+    weight: 0.9
   - osd: osd.1
     root: default
     host: osd-2
-    weight: 0.3
+    weight: 0.2
   - osd: osd.2
     root: default
     host: osd-1
-    weight: 0.3
+    weight: 0.11
