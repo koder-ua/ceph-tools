@@ -1,28 +1,28 @@
 from __future__ import print_function
 
 import re
-import os
 import sys
 import json
 import shutil
 import logging
 import argparse
+import tempfile
 import collections
 
-from common import run, setup_loggers, tmpnam, b2ssize
-from common import logger as clogger
+from cephlib.common import check_output, setup_loggers, tmpnam, b2ssize
+from cephlib.common import logger as clogger
 
 logger = logging.getLogger("remap")
 
 
-class PGInfo:
+class PGInfo(object):
     def __init__(self, pgid, acting, size):
         self.pgid = pgid
         self.acting = acting
         self.size = size
 
 
-class Pool:
+class Pool(object):
     def __init__(self, name, pid, pg_count):
         self.name = name
         self.pid = pid
@@ -36,12 +36,40 @@ class Pool:
         return res
 
 
-class OSDChanges:
+class OSDChanges(object):
     def __init__(self):
         self.pg_in = 0
         self.pg_out = 0
         self.bytes_in = 0
         self.bytes_out = 0
+
+
+class OSDData(object):
+    def __init__(self, pg=0, bytes=0):
+        self.pg = pg
+        self.bytes = bytes
+
+
+def get_pg_dump(pg_dump_js=None):
+    if pg_dump_js is None:
+        pg_dump_js = check_output("ceph pg dump --format=json")
+
+    if isinstance(pg_dump_js, str):
+        return json.loads(pg_dump_js)
+    else:
+        assert isinstance(pg_dump_js, dict)
+        return pg_dump_js
+
+
+def get_osd_curr(pg_dump_js=None):
+    res = collections.defaultdict(OSDData)
+    pg_dump = get_pg_dump(pg_dump_js)['pg_stats']
+
+    for pg_info in pg_dump:
+        for osd_id in pg_info['acting']:
+            res[osd_id].pg += 1
+            res[osd_id].bytes += pg_info['stat_sum']['num_bytes']
+    return res
 
 
 def calc_diff(p_old, p_new):
@@ -93,10 +121,7 @@ def parse(map_data):
 
 
 def get_pg_sizes(pg_dump_js=None):
-    if pg_dump_js is None:
-        pg_dump_js = run("ceph pg dump --format=json")
-
-    pg_dump = json.loads(pg_dump_js)['pg_stats']
+    pg_dump = get_pg_dump(pg_dump_js)['pg_stats']
     res = {}
 
     for pg_dict in pg_dump:
@@ -155,12 +180,20 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
+def calculate_remap_crush(new_crush_f, pg_dump_f=None):
+    with tempfile.NamedTemporaryFile() as osd_map_fd:
+        check_output("ceph osd getmap -o {0}".format(osd_map_fd.name))
+        with tempfile.NamedTemporaryFile() as osd_map_new_fd:
+            shutil.copy(osd_map_fd.name, osd_map_new_fd.name)
+            check_output("osdmaptool --import-crush {0} {1}".format(new_crush_f, osd_map_new_fd.name))
+            return calculate_remap(osd_map_fd.name, osd_map_new_fd.name, pg_dump_f=pg_dump_f)
+
 
 def calculate_remap(curr_map_f, new_map_f, pg_dump_f=None):
-    curr_distr = run("osdmaptool --test-map-pgs-dump {0}", curr_map_f)
+    curr_distr = check_output("osdmaptool --test-map-pgs-dump {0}".format(curr_map_f))
     curr_pools = {pool.pid: pool for pool in parse(curr_distr)}
 
-    new_distr = run("osdmaptool --test-map-pgs-dump {0}", new_map_f)
+    new_distr = check_output("osdmaptool --test-map-pgs-dump {0}".format(new_map_f))
     new_pools = {pool.pid: pool for pool in parse(new_distr)}
 
     pool_pairs = {pool.pid: (curr_pools[pool.pid], pool) for pool in new_pools.values()}
@@ -180,18 +213,18 @@ def main(argv):
         crush_map_f = tmpnam()
 
         if opts.osd_map:
-            run("osdmaptool --export-crush {0} {1}", crush_map_f, opts.osd_map)
+            check_output("osdmaptool --export-crush {0} {1}".format(crush_map_f, opts.osd_map))
         else:
-            run("ceph osd getcrushmap -o {0}", crush_map_f)
+            check_output("ceph osd getcrushmap -o {0}".format(crush_map_f))
 
-        run("crushtool -d {0} -o {1}", crush_map_f, opts.out_file)
+            check_output("crushtool -d {0} -o {1}".format(crush_map_f, opts.out_file))
         return 0
 
     if opts.osd_map:
         osd_map_f = opts.osd_map
     else:
         osd_map_f = tmpnam()
-        run("ceph osd getmap -o {0}", osd_map_f)
+        check_output("ceph osd getmap -o {0}", osd_map_f)
 
     crush_map_f = tmpnam()
 
@@ -199,15 +232,15 @@ def main(argv):
         crush_map_txt_f = opts.crush_file
     else:
         assert opts.subparser_name == "interactive"
-        run("osdmaptool --export-crush {0} {1}", crush_map_f, osd_map_f)
+        check_output("osdmaptool --export-crush {0} {1}".format(crush_map_f, osd_map_f))
         crush_map_txt_f = tmpnam()
-        run("crushtool -d {0} -o {1}", crush_map_f, crush_map_txt_f)
-        run("{0} {1}", opts.editor, crush_map_txt_f)
+        check_output("crushtool -d {0} -o {1}".format(crush_map_f, crush_map_txt_f))
+        check_output("{0} {1}".format(opts.editor, crush_map_txt_f))
 
         logger.info("Press enter, when done")
         sys.stdin.readline()
 
-    run("crushtool -c {0} -o {1}", crush_map_txt_f, crush_map_f)
+    check_output("crushtool -c {0} -o {1}".format(crush_map_txt_f, crush_map_f))
 
     if opts.osd_map:
         # don't change original osd map file
@@ -217,7 +250,7 @@ def main(argv):
     else:
         osd_map_new_f = osd_map_f
 
-    run("osdmaptool --import-crush {0} {1}", crush_map_f, osd_map_new_f)
+    check_output("osdmaptool --import-crush {0} {1}".format(crush_map_f, osd_map_new_f))
 
     osd_changes = calculate_remap(osd_map_f, osd_map_new_f, opts.pg_dump)
 

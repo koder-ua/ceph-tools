@@ -11,8 +11,8 @@ import argparse
 import yaml
 
 
-from common import run, b2ssize, tmpnam
-from calculate_remap import calculate_remap
+from cephlib.common import check_output, b2ssize, tmpnam
+from calculate_remap import calculate_remap, get_osd_curr
 
 
 BE_QUIET = False
@@ -98,59 +98,12 @@ def find_nodes(crush, path):
     return res
 
 
-help = """Gently change OSD's weight cluster in cluster.
-
-Config file example(yaml):
-
-# max weight change step
-step: 0.1
-
-# max OSD reweighted in parallel
-max_reweight: 1
-
-# minimal weight difference to be corrected
-min_weight_diff: 0.01
-
-# osd selection algorithm
-osd_selection: rround
-
-# list of all OSD to be rebalanced
-osds:
-  # OSD tree location: name, root, host
-  - osd: osd.0
-    root: default
-    host: osd-0
-    # required weight
-    weight: 0.3
-
-  # more OSD's
-  - osd: osd.1
-    root: default
-    host: osd-2
-    weight: 0.3
-"""
-
-
-def parse_args(argv):
-    parser = argparse.ArgumentParser(usage=help)
-    parser.add_argument("-q", "--quiet", help="Don't print any info/debug messages",
-                        action='store_true')
-    parser.add_argument("-e", "--estimate-only", help="Only estimate rebalance size " +
-                                                      "(incomaptible with -n/--no-estimate)",
-                        action='store_true')
-    parser.add_argument("-n", "--no-estimate", help="Don't estimate rebalance size " +
-                                                    "(incomaptible with -e/--estimate-only)",
-                        action='store_true')
-    parser.add_argument("config", help="Yaml rebalance config file")
-    return parser.parse_args(argv[1:])
-
-
 default_zone_order = ["osd", "host", "chassis", "rack", "row", "pdu",
                       "pod", "room", "datacenter", "region", "root"]
 
 
 def is_rebalance_complete():
-    for dct in json.loads(run("ceph pg stat --format=json"))['num_pg_by_state']:
+    for dct in json.loads(check_output("ceph pg stat --format=json"))['num_pg_by_state']:
         if dct['name'] != "active+clean" and dct["num"] != 0:
             return False
     return True
@@ -164,7 +117,7 @@ def request_weight_update(node, path, new_weight):
     if not BE_QUIET:
         print(cmd)
 
-    run(cmd.format(name=node.name, weight=new_weight, path=path_s))
+    check_output(cmd.format(name=node.name, weight=new_weight, path=path_s))
 
 
 def wait_rebalance_to_complete(any_updates):
@@ -190,7 +143,7 @@ def wait_rebalance_to_complete(any_updates):
 
 
 def do_rebalance(config, args):
-    osd_tree_js = run("ceph osd tree --format=json")
+    osd_tree_js = check_output("ceph osd tree --format=json")
     crush = load_crush_tree(osd_tree_js)
     max_nodes_per_round = config.get('max_reweight', 4)
     max_weight_change = config.get('step', 0.5)
@@ -199,8 +152,7 @@ def do_rebalance(config, args):
 
     rebalance_nodes = []
 
-    if not BE_QUIET:
-        total_weight_change = 0.0
+    total_weight_change = 0.0
 
     for node in config['osds']:
         node = node.copy()
@@ -223,18 +175,19 @@ def do_rebalance(config, args):
 
     if not args.no_estimate:
         osd_map_f = tmpnam()
-        run("ceph osd getmap -o {0}", osd_map_f)
+        check_output("ceph osd getmap -o {0}".format(osd_map_f))
         crush_map_f = tmpnam()
-        run("osdmaptool --export-crush {0} {1}", crush_map_f, osd_map_f)
+        check_output("osdmaptool --export-crush {0} {1}".format(crush_map_f, osd_map_f))
 
-        cmd = "crushtool -i {crush_map_f} -o {crush_map_f} --update-item {id} {weight} {name} {loc}"
+        cmd_templ = "crushtool -i {crush_map_f} -o {crush_map_f} --update-item {id} {weight} {name} {loc}"
         for node, path, new_weight in rebalance_nodes:
             loc = " ".join("--loc {0} {1}".format(tp, name) for tp, name in path)
-            run(cmd, crush_map_f=crush_map_f, id=node.id, weight=new_weight, name=node.name, loc=loc)
+            cmd = cmd_templ.format(crush_map_f=crush_map_f, id=node.id, weight=new_weight, name=node.name, loc=loc)
+            check_output(cmd)
 
         osd_map_new_f = tmpnam()
         shutil.copy(osd_map_f, osd_map_new_f)
-        run("osdmaptool --import-crush {0} {1}", crush_map_f, osd_map_new_f)
+        check_output("osdmaptool --import-crush {0} {1}".format(crush_map_f, osd_map_new_f))
         osd_changes = calculate_remap(osd_map_f, osd_map_new_f)
 
         total_send = 0
@@ -246,6 +199,16 @@ def do_rebalance(config, args):
 
         print("Total bytes to be moved :", b2ssize(total_send) + "B")
         print("Total PG to be moved  :", total_moved_pg)
+
+        if args.show_after:
+            osd_curr = get_osd_curr()
+            for osd_id, osd_change in sorted(osd_changes.items()):
+                pg_diff = osd_change.pg_in - osd_change.pg_out
+                bytes_diff = osd_change.bytes_in - osd_change.bytes_out
+                print("OSD {0}, PG {1:>4d} => {2:>4d},  bytes {3:>6s} => {4:>6s}".format(
+                    osd_id,
+                    osd_curr[osd_id].pg, osd_curr[osd_id].pg + pg_diff,
+                    b2ssize(osd_curr[osd_id].bytes), b2ssize(osd_curr[osd_id].bytes + bytes_diff)))
 
         if args.estimate_only:
             return
@@ -292,12 +255,72 @@ def do_rebalance(config, args):
     wait_rebalance_to_complete(False)
 
 
-def main(argv):
-    args = parse_args(argv)
+help = """Gently change OSD's weight cluster in cluster.
+
+Config file example(yaml):
+
+# max weight change step
+step: 0.1
+
+# max OSD reweighted in parallel
+max_reweight: 1
+
+# minimal weight difference to be corrected
+min_weight_diff: 0.01
+
+# osd selection algorithm
+osd_selection: rround
+
+# list of all OSD to be rebalanced
+osds:
+  # OSD tree location: name, root, host
+  - osd: osd.0
+    root: default
+    host: osd-0
+    # required weight
+    weight: 0.3
+
+  # more OSD's
+  - osd: osd.1
+    root: default
+    host: osd-2
+    weight: 0.3
+"""
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(usage=help)
+    parser.add_argument("-q", "--quiet", help="Don't print any info/debug messages", action='store_true')
+
+    parser.add_argument("-e", "--estimate-only", action='store_true',
+                        help="Only estimate rebalance size (incompatible with -n/--no-estimate)")
+
+    parser.add_argument("-s", "--show-after", action='store_true',
+                        help="Show PGs and data distibution after rebalance complete" +
+                             "(incompatible with -n/--no-estimate)")
+
+    parser.add_argument("-n", "--no-estimate", action='store_true',
+                        help="Don't estimate rebalance size (incompatible with -e/--estimate-only)")
+
+    parser.add_argument("config", help="Yaml rebalance config file")
+    args = parser.parse_args(argv[1:])
 
     if args.estimate_only and args.no_estimate:
         sys.stderr.write("-e/--estimate-only is incompatible with -n/--no-estimate\n")
         sys.stderr.flush()
+        return None
+
+    if args.show_after and args.no_estimate:
+        sys.stderr.write("-s/--show-after is incompatible with -n/--no-estimate\n")
+        sys.stderr.flush()
+        return None
+
+    return args
+
+def main(argv):
+    args = parse_args(argv)
+
+    if not args:
         return 1
 
     global BE_QUIET

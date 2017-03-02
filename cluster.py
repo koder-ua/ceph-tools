@@ -1,7 +1,7 @@
 import json
 import collections
 
-from common import run
+from cephlib.common import run
 
 
 OsdAddrs = collections.namedtuple('OsdAddrs', ("public", "cluster"))
