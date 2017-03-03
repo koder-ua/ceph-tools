@@ -46,13 +46,14 @@ def load_crush_tree(osd_tree):
     childs_ids = {}
 
     for node_js in tree['nodes']:
+        weight = node_js.get('crush_weight', None)
+        weight = float(weight) if weight is not None else weight
         node = CrushNode(
             id=node_js['id'],
             name=node_js['name'],
             type=node_js['type'],
-            weight=node_js.get('crush_weight', None)
+            weight=weight
         )
-
         childs_ids[node.id] = node_js.get('children', [])
         nodes_map[node.id] = node
 
@@ -151,7 +152,6 @@ def do_rebalance(config, args):
     selection_algo = config.get('osd_selection', 'rround')
 
     rebalance_nodes = []
-
     total_weight_change = 0.0
 
     for node in config['osds']:
@@ -159,12 +159,13 @@ def do_rebalance(config, args):
         new_weight = node.pop('weight')
         path = list(node.items())
         path.sort(key=lambda x: -default_zone_order.index(x[0]))
-        node = find_node(crush, path)
-        rebalance_nodes.append((node, path, new_weight))
+        cnode = find_node(crush, path)
+        rebalance_nodes.append((cnode, path, new_weight))
 
         if not BE_QUIET:
-            print(node, "=>", new_weight)
-            total_weight_change += abs(node.weight - new_weight)
+            print(repr(new_weight), repr(cnode.weight))
+            print(cnode, "=>", new_weight)
+            total_weight_change += abs(cnode.weight - new_weight)
 
     if not BE_QUIET:
         if total_weight_change < min_weight_diff:

@@ -4,7 +4,7 @@ you can't just grub and run selected scripts.
 
     $ git clone https://github.com/koder-ua/ceph-tools.git
     $ cd ceph-tools
-    $ pip install -r requirement.txt
+    $ pip install -r requirements.txt
 
 rebalance.py
 ------------
