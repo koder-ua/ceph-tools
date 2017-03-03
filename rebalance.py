@@ -104,9 +104,16 @@ default_zone_order = ["osd", "host", "chassis", "rack", "row", "pdu",
 
 
 def is_rebalance_complete():
-    for dct in json.loads(check_output("ceph pg stat --format=json"))['num_pg_by_state']:
-        if dct['name'] != "active+clean" and dct["num"] != 0:
-            return False
+    pg_stat = json.loads(check_output("ceph pg stat --format=json"))
+    if 'num_pg_by_state' in pg_stat:
+        for dct in ['num_pg_by_state']:
+            if dct['name'] != "active+clean" and dct["num"] != 0:
+                return False
+    else:
+        for pg_stat_dict in json.loads(check_output("ceph -s --format=json"))['pgmap']['pgs_by_state']:
+            if pg_stat_dict['state_name'] != "active+clean":
+                if pg_stat_dict['count'] != 0:
+                    return False
     return True
 
 
