@@ -25,6 +25,7 @@ class CrushNode(object):
         self.name = name
         self.type = type
         self.childs = []
+        self.full_path = None
 
     def __str__(self):
         return "{0}(name={1!r}, weight={2}, id={3})"\
@@ -38,6 +39,7 @@ class Crush(object):
     def __init__(self, nodes_map, roots):
         self.nodes_map =  nodes_map
         self.roots = roots
+        self.search_cache = None
 
 
 def load_crush_tree(osd_tree):
@@ -78,23 +80,43 @@ def find_node(crush, path):
     return nodes[0]
 
 
+def build_search_idx(crush):
+    if crush.search_cache is None:
+        not_done = []
+        for node in crush.roots:
+            node.full_path = [(node.type, node.name)]
+            not_done.append(node)
+
+        done = []
+        while not_done:
+            new_not_done = []
+            for node in not_done:
+                if node.childs:
+                    for cnode in node.childs:
+                        cnode.full_path = node.full_path[:] + [(cnode.type, cnode.name)]
+                        new_not_done.append(cnode)
+                else:
+                    done.append(node)
+            not_done = new_not_done
+        crush.search_cache = done
+
+
 def find_nodes(crush, path):
     if not path:
         return crush.roots
 
-    current_nodes = crush.roots
-    for tp, name in path[:-1]:
-        new_current_nodes = []
-        for node in current_nodes:
-            if node.type == tp and node.name == name:
-                new_current_nodes.extend(node.childs)
-        current_nodes = new_current_nodes
-
     res = []
-    tp, name = path[-1]
-    for node in current_nodes:
-        if node.type == tp and node.name == name:
-            res.append(node)
+    for node in crush.search_cache:
+        nfilter = dict(path)
+        for tp, val in node.full_path:
+            if tp in nfilter:
+                if nfilter[tp] == val:
+                    del nfilter[tp]
+                else:
+                    break
+        else:
+            if not nfilter:
+                res.append(node)
 
     return res
 
@@ -117,9 +139,9 @@ def is_rebalance_complete():
     return True
 
 
-def request_weight_update(node, path, new_weight):
+def request_weight_update(node, new_weight):
     cmd = "ceph osd crush set {name} {weight} {path}"
-    path_s = " ".join("{0}={1}".format(tp, name) for tp, name in path[:-1])
+    path_s = " ".join("{0}={1}".format(tp, name) for tp, name in node.full_path)
     cmd = cmd.format(name=node.name, weight=new_weight, path=path_s)
 
     if not BE_QUIET:
@@ -160,6 +182,7 @@ def do_rebalance(config, args):
 
     rebalance_nodes = []
     total_weight_change = 0.0
+    build_search_idx(crush)
 
     for node in config['osds']:
         node = node.copy()
@@ -167,7 +190,7 @@ def do_rebalance(config, args):
         path = list(node.items())
         path.sort(key=lambda x: -default_zone_order.index(x[0]))
         cnode = find_node(crush, path)
-        rebalance_nodes.append((cnode, path, new_weight))
+        rebalance_nodes.append((cnode, new_weight))
 
         if not BE_QUIET:
             print(repr(new_weight), repr(cnode.weight))
@@ -188,8 +211,8 @@ def do_rebalance(config, args):
         check_output("osdmaptool --export-crush {0} {1}".format(crush_map_f, osd_map_f))
 
         cmd_templ = "crushtool -i {crush_map_f} -o {crush_map_f} --update-item {id} {weight} {name} {loc}"
-        for node, path, new_weight in rebalance_nodes:
-            loc = " ".join("--loc {0} {1}".format(tp, name) for tp, name in path)
+        for node, new_weight in rebalance_nodes:
+            loc = " ".join("--loc {0} {1}".format(tp, name) for tp, name in node.full_path)
             cmd = cmd_templ.format(crush_map_f=crush_map_f, id=node.id, weight=new_weight, name=node.name, loc=loc)
             check_output(cmd)
 
@@ -239,7 +262,7 @@ def do_rebalance(config, args):
             rebalance_nodes = rebalance_nodes[max_nodes_per_round:] + next_nodes
 
         any_updates = False
-        for node, path, required_weight in next_nodes:
+        for node, required_weight in next_nodes:
             weight_change = required_weight - node.weight
 
             if abs(weight_change) > max_weight_change:
@@ -247,13 +270,11 @@ def do_rebalance(config, args):
 
             new_weight = node.weight + weight_change
             if abs(weight_change) > min_weight_diff:
-                request_weight_update(node, path, new_weight)
+                request_weight_update(node, new_weight)
                 any_updates = True
 
             if abs(new_weight - required_weight) < min_weight_diff:
-                rebalance_nodes = [(rnode, path, w)
-                                   for (rnode, path, w) in rebalance_nodes
-                                   if rnode is not node]
+                rebalance_nodes = [(rnode, w) for (rnode, w) in rebalance_nodes if rnode is not node]
 
             node.weight = new_weight
 
