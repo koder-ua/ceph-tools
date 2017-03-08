@@ -16,15 +16,18 @@ To run it ones need to create yaml file, describing expected weights of OSD's.
 Example:
 
     step: 0.1  # max weight change in one step for one OSD
-    max_reweight: 1   # max OSD, updated in parallel
+    restep: 0.02  # max reweight change in one step for one OSD
+    max_updated_nodes: 4   # max OSD, updated in parallel
     min_weight_diff: 0.01  # minimal weight change to be applied
                            # e.g. if current weight is 1.222 and required weight is 1.223 weight would not be changed
+    min_reweight_diff: 0.01  # minimal reweight change to be applied, same as above
     osds:   # list of OSD
         # root/host/name - path in CRUSH to select osd
       - osd: osd.0
         root: default 
         host: osd-0
         weight: 0.3  # new weight
+        reweight: 0.95  # new reweight
       - osd: osd.1
         root: default
         host: osd-2

@@ -1,12 +1,28 @@
 step: 0.1
-max_reweight: 4
+restep: 0.02
+max_updated_nodes: 4
 min_weight_diff: 0.01
+min_reweight_diff: 0.002
 osds:
   - osd: osd.0
-    weight: 0.01759
+    root: default
+    weight: 0.2
   - osd: osd.1
-    weight: 0.01759
+    root: default
+    weight: 0.2
   - osd: osd.2
-    weight: 0.01759
+    root: default
+    weight: 0.2
   - osd: osd.3
-    weight: 0.01759
+    root: default
+    weight: 0.2
+
+
+  - osd: osd.0
+    reweight: 1.0
+  - osd: osd.1
+    reweight: 1.0
+  - osd: osd.2
+    reweight: 1.0
+  - osd: osd.3
+    reweight: 1.0

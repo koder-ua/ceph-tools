@@ -180,13 +180,18 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
-def calculate_remap_crush(new_crush_f, pg_dump_f=None):
+def calculate_remap_crush(new_crush_f, pg_dump_f=None, osd_map_name=None):
     with tempfile.NamedTemporaryFile() as osd_map_fd:
-        check_output("ceph osd getmap -o {0}".format(osd_map_fd.name))
+
+        if not osd_map_name:
+            check_output("ceph osd getmap -o {0}".format(osd_map_fd.name))
+        else:
+            osd_map_name = osd_map_fd.name
+
         with tempfile.NamedTemporaryFile() as osd_map_new_fd:
-            shutil.copy(osd_map_fd.name, osd_map_new_fd.name)
+            shutil.copy(osd_map_name, osd_map_new_fd.name)
             check_output("osdmaptool --import-crush {0} {1}".format(new_crush_f, osd_map_new_fd.name))
-            return calculate_remap(osd_map_fd.name, osd_map_new_fd.name, pg_dump_f=pg_dump_f)
+            return calculate_remap(osd_map_name, osd_map_new_fd.name, pg_dump_f=pg_dump_f)
 
 
 def calculate_remap(curr_map_f, new_map_f, pg_dump_f=None):
