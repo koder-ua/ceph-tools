@@ -1,0 +1,27 @@
+{
+    "version": 1,
+    "disable_existing_loggers": true,
+    "formatters": {
+        "simple": {
+            "format": "%(asctime)s - %(levelname)s - %(message)s",
+            "datefmt": "%H:%M:%S"
+        }
+    },
+    "handlers": {
+        "console": {
+            "level": "INFO",
+            "class": "logging.StreamHandler",
+            "formatter": "simple",
+            "stream"  : "ext://sys.stdout"
+        }
+    },
+    "loggers": {
+        "cmd":     {"level": "DEBUG", "handlers": ["console"]},
+        "storage": {"level": "DEBUG", "handlers": ["console"]},
+        "rpc":     {"level": "DEBUG", "handlers": ["console"]},
+        "cephlib": {"level": "DEBUG", "handlers": ["console"]},
+        "collect": {"level": "DEBUG", "handlers": ["console"]},
+        "agent":   {"level": "DEBUG", "handlers": ["console"]},
+        "ceph":    {"level": "DEBUG", "handlers": ["console"]}
+    }
+}

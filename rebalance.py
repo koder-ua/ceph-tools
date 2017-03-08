@@ -1,14 +1,16 @@
 from __future__ import print_function
 
 import re
+import os
 import sys
 import time
 import json
 import math
 import shutil
+import os.path
+import logging
 import argparse
-import collections
-
+import logging.config
 
 import yaml
 
@@ -17,7 +19,7 @@ from cephlib.common import check_output, b2ssize, tmpnam
 from calculate_remap import calculate_remap, get_osd_curr
 
 
-BE_QUIET = False
+logger = logging.getLogger("ceph.rebalance")
 
 
 class bcolors:
@@ -52,7 +54,7 @@ class Node(object):
 
     def __str__(self):
         w = ", w={0.weight}".format(self) if self.weight is not None else ""
-        fp = self.str_path() if self.full_path else ""
+        fp = (", " + self.str_path()) if self.full_path else ""
         return "{0.type}(name={0.name!r}, id={0.id}{1}{2})".format(self, w, fp)
 
     def __repr__(self):
@@ -70,6 +72,13 @@ class Node(object):
         res.childs = self.childs
         return res
 
+    def iter_nodes(self, node_type):
+        if self.type == node_type:
+            yield self
+        for node in self.childs:
+            for res in node.iter_nodes(node_type):
+                yield res
+
 
 class Crush(object):
     def __init__(self, nodes_map, roots):
@@ -79,6 +88,11 @@ class Crush(object):
 
     def __str__(self):
         return "\n".join("\n".join(root.tree()) for root in self.roots)
+
+    def iter_nodes(self, node_type):
+        for node in self.roots:
+            for res in node.iter_nodes(node_type):
+                yield res
 
     def build_search_idx(self):
         if self.search_cache is None:
@@ -126,8 +140,7 @@ class Crush(object):
         if not nodes:
             raise IndexError("Can't found any node with path {0!r}".format(path))
         if len(nodes) > 1:
-            raise IndexError(
-                "Found {0} nodes  for path {1!r} (should be only 1)".format(len(nodes), path))
+            raise IndexError("Found {0} nodes  for path {1!r} (should be only 1)".format(len(nodes), path))
         return nodes[0]
 
 
@@ -223,54 +236,42 @@ def is_rebalance_complete(allowed_states=("active+clean", "active+remapped")):
 
 
 def request_weight_update(node, new_weight):
-    cmd = "ceph osd crush set {name} {weight} {path}"
     path_s = " ".join("{0}={1}".format(tp, name) for tp, name in node.full_path)
-    cmd = cmd.format(name=node.name, weight=new_weight, path=path_s)
-
-    if not BE_QUIET:
-        print(cmd)
-
+    cmd = "ceph osd crush set {name} {weight} {path}".format(name=node.name, weight=new_weight, path=path_s)
     check_output(cmd)
 
 
 def request_reweight_update(node, new_weight):
     osd_id = int(node.name.split('.')[1])
-    cmd = "ceph osd reweight {0} {1}".format(osd_id, new_weight)
-
-    if not BE_QUIET:
-        print(cmd)
-
-    check_output(cmd)
+    check_output("ceph osd reweight {0} {1}".format(osd_id, new_weight))
 
 
-def wait_rebalance_to_complete(any_updates):
+def wait_rebalance_to_complete(any_updates, sleep_interwal=2):
     if not any_updates:
         if is_rebalance_complete():
             return
 
-    if not BE_QUIET:
-        print("Waiting for cluster to complete rebalance ", end="")
-        sys.stdout.flush()
+    logger.debug("Waiting for cluster to complete rebalance")
 
     if any_updates:
-        time.sleep(5)
+        time.sleep(sleep_interwal)
 
     while not is_rebalance_complete():
-        if not BE_QUIET:
-            print('.', end="")
-            sys.stdout.flush()
-        time.sleep(5)
-
-    if not BE_QUIET:
-        print("done")
+        sleep_interwal *= 1.5
+        time.sleep(sleep_interwal)
+        logger.debug("Waiting for cluster to complete rebalance")
 
 
-def load_all_data(args):
-    if not args.osd_map:
-        osd_map_f = tmpnam()
-        check_output("ceph osd getmap -o {0}".format(osd_map_f))
+def load_all_data(opts, no_cache=False):
+    if no_cache or not opts.osd_map:
+        if opts.offline:
+            logger.error("Can't get osd's map in offline mode as --osd-map is not passed from CLI")
+            return None, None, None, None
+        else:
+            osd_map_f = tmpnam()
+            check_output("ceph osd getmap -o {0}".format(osd_map_f))
     else:
-        osd_map_f = args.osd_map
+        osd_map_f = opts.osd_map
 
     crushmap_bin_f = tmpnam()
     check_output("osdmaptool --export-crush {0} {1}".format(crushmap_bin_f, osd_map_f))
@@ -278,14 +279,14 @@ def load_all_data(args):
     crushmap_txt_f = tmpnam()
     check_output("crushtool -d {0} -o {1}".format(crushmap_bin_f, crushmap_txt_f))
 
-    if not args.osd_tree:
-        if args.offline:
-            print("Can't get osd's reweright in offline mode as --osd-tree is not passed from CLI")
+    if no_cache or not opts.osd_tree:
+        if opts.offline:
+            logger.warning("Can't get osd's reweright in offline mode as --osd-tree is not passed from CLI")
             osd_tree_js = None
         else:
             osd_tree_js = check_output("ceph osd tree --format=json")
     else:
-        osd_tree_js = open(args.osd_tree).read()
+        osd_tree_js = open(opts.osd_tree).read()
 
     curr_reweight = {}
     if osd_tree_js:
@@ -324,7 +325,7 @@ def prepare_update_config(config_dict, crush, curr_reweight):
     for node in config_dict['osds']:
         node = node.copy()
         if 'weight' not in node and 'reweight' not in node:
-            print("Node with osd {0!r} has neither weight no reweight. Fix config and restart".format(node))
+            logger.error("Node with osd %r has neither weight no reweight. Fix config and restart", node)
             return None
 
         new_weight = node.pop('weight', None)
@@ -337,68 +338,79 @@ def prepare_update_config(config_dict, crush, curr_reweight):
             try:
                 cnode = crush.find_node(path)
             except IndexError as exc:
-                print("Fail to find node {0}: {1}".format(path_s, exc))
+                logger.error("Fail to find node %s: %s", path_s, exc)
                 return None
 
             diff = abs(new_weight - cnode.weight)
             if diff < config.min_weight_diff:
-                print(("Skip weight update for {0} as requested diff({1:.4f}) " +
-                       "is less than min diff({2:.4f})").format(cnode, diff, config.min_weight_diff))
+                logger.info("Skip %s as requested weight diff %.2f is less than %.2f",
+                            cnode.str_path(), diff, config.min_weight_diff)
             else:
                 config.rebalance_nodes.append((cnode, new_weight))
                 config.total_weight_change += diff
-                print(cnode.str_path(), "weight =", cnode.weight, "=>", new_weight)
+                logger.info("%s weight = %s => %s", cnode.str_path(), cnode.weight, new_weight)
 
         if new_reweight is not None:
             osd_name = node['osd']
             if osd_name not in curr_reweight:
-                print(("No reweight coeficient available for {0}. " +
-                       "Can't apply reweight parameter from config").format(osd_name))
+                logger.error("No reweight coeficient available for %s. Can't apply reweight parameter from config",
+                             osd_name)
                 return None
 
             if new_osd_reweights.get(node['osd'], new_reweight) != new_reweight:
-                print(("{0} has different reweight in different tree parts in config." +
-                       "Impossible to apply this configuration").format(osd_name))
+                logger.error("%s has different reweight in different tree parts in config." +
+                             "Impossible to apply this configuration", osd_name)
                 return None
 
             diff = abs(new_reweight - curr_reweight[osd_name])
             if diff < config.min_reweight_diff:
-                print(("Skip weight update for {0} as requested diff({1:.4f}) " +
-                       "is less than min diff({2:.4f})").format(osd_name, diff, config.min_weight_diff))
+                logger.info("Skip reweighting %s as requested diff %.3f is less than %.3f",
+                            osd_name, diff, config.min_reweight_diff)
             else:
                 new_osd_reweights[osd_name] = new_reweight
                 config.total_reweight_change += diff
-                print(osd_name, "Reweigh =", curr_reweight[osd_name], "=>", new_reweight)
+                logger.info("%s Reweigh = %s => %s", osd_name, curr_reweight[osd_name], new_reweight)
 
     config.reweight_nodes = [(FakedNode(name=osd_name, weight=curr_reweight[osd_name]), new_reweight)
                              for osd_name, new_reweight in new_osd_reweights.items()]
     return config
 
 
-def do_rebalance(config_dict, args):
-    crush, curr_reweight, crushmap_bin_f, osd_map_f = load_all_data(args)
+def do_rebalance(config_dict, opts):
+    crush, curr_reweight, crushmap_bin_f, osd_map_f = load_all_data(opts)
+    if crush is None:
+        return 1
+
     config = prepare_update_config(config_dict, crush, curr_reweight)
 
     if config is None:
         return 1
 
+    expected_weight_results = dict((tuple(osd.full_path), osd.weight)
+                                   for osd in crush.iter_nodes('osd'))
+    expected_weight_results.update((tuple(node.full_path), new_weight)
+                                   for node, new_weight in config.rebalance_nodes)
+
+    expected_reweight_results = curr_reweight.copy()
+    expected_reweight_results.update(config.reweight_nodes)
+
     if not (config.rebalance_nodes or config.reweight_nodes):
-        print("Nothing to change")
+        logger.info("Nothing to change")
         return 0
-    elif not BE_QUIET:
-        if config.total_weight_change > 0:
-            print("Total sum of all weight changes = {0:.2f}".format(config.total_weight_change))
-        if config.total_reweight_change > 0:
-            print("Total sum of all reweight changes = {0:.2f}".format(config.total_reweight_change))
+
+    if config.total_weight_change > 0:
+        logger.info("Total sum of all weight changes = %.2f", config.total_weight_change)
+    if config.total_reweight_change > 0:
+        logger.info("Total sum of all reweight changes = %.2f", config.total_reweight_change)
 
     # --------------------  DO ESTIMATION ------------------------------------------------------------------------------
 
-    if not args.no_estimate:
+    if not opts.no_estimate:
         if config.total_reweight_change != 0.0:
-            print("Warning: can't estimate reweight results! Estimation only includes weight changes!")
+            logger.warning("Can't estimate reweight results! Estimation only includes weight changes!")
 
         if config.total_weight_change == 0:
-            print("No weight is changes. No PG/data would be moved")
+            logger.info("No weight is changes. No PG/data would be moved")
         else:
             cmd_templ = "crushtool -i {crush_map_f} -o {crush_map_f} --update-item {id} {weight} {name} {loc}"
             for node, new_weight in config.rebalance_nodes:
@@ -411,10 +423,10 @@ def do_rebalance(config_dict, args):
             shutil.copy(osd_map_f, osd_map_new_f)
             check_output("osdmaptool --import-crush {0} {1}".format(crushmap_bin_f, osd_map_new_f))
 
-            if args.offline and not args.pg_dump:
-                print("Can't calculate pg/data movement in offline mode if no pg dump provided")
+            if opts.offline and not opts.pg_dump:
+                logger.warning("Can't calculate pg/data movement in offline mode if no pg dump provided")
             else:
-                osd_changes = calculate_remap(osd_map_f, osd_map_new_f, pg_dump_f=args.pg_dump)
+                osd_changes = calculate_remap(osd_map_f, osd_map_new_f, pg_dump_f=opts.pg_dump)
 
                 total_send = 0
                 total_moved_pg = 0
@@ -423,38 +435,41 @@ def do_rebalance(config_dict, args):
                     total_send += osd_change.bytes_in
                     total_moved_pg += osd_change.pg_in
 
-                print("Total bytes to be moved :", b2ssize(total_send) + "B")
-                print("Total PG to be moved  :", total_moved_pg)
+                logger.info("Total bytes to be moved : %sB", b2ssize(total_send))
+                logger.info("Total PG to be moved  : %s", total_moved_pg)
 
-                if args.show_after:
+                if opts.show_after:
                     osd_curr = get_osd_curr()
                     for osd_id, osd_change in sorted(osd_changes.items()):
                         pg_diff = osd_change.pg_in - osd_change.pg_out
                         bytes_diff = osd_change.bytes_in - osd_change.bytes_out
-                        print("OSD {0}, PG {1:>4d} => {2:>4d},  bytes {3:>6s} => {4:>6s}".format(
-                            osd_id,
-                            osd_curr[osd_id].pg, osd_curr[osd_id].pg + pg_diff,
-                            b2ssize(osd_curr[osd_id].bytes), b2ssize(osd_curr[osd_id].bytes + bytes_diff)))
+                        logger.info("OSD {0}, PG {1:>4d} => {2:>4d},  bytes {3:>6s} => {4:>6s}".format(
+                                    osd_id, osd_curr[osd_id].pg,
+                                    osd_curr[osd_id].pg + pg_diff,
+                                    b2ssize(osd_curr[osd_id].bytes),
+                                    b2ssize(osd_curr[osd_id].bytes + bytes_diff)))
 
-        if args.estimate_only:
+        if opts.estimate_only:
             return 0
 
     # --------------------  UPDATE CLUSTER -----------------------------------------------------------------------------
 
-    if args.offline:
-        print("No updates would be made in offline mode")
+    if opts.offline:
+        logger.error("No updates would be made in offline mode")
         return 1
 
+    logger.info("Start updating the cluster")
+
     already_changed = 0.0
-    requested_changes = config.total_weight_change + config.total_reweight_change
+    requested_changes = config.total_weight_change / config.max_weight_change + \
+                        config.total_reweight_change / config.max_reweight_change
 
     wait_rebalance_to_complete(False)
 
     round = 0
     while config.rebalance_nodes or config.reweight_nodes:
-        if not BE_QUIET:
-            if already_changed > config.min_weight_diff:
-                print("Done {0}%".format(int(already_changed * 100.0 / requested_changes + 0.5)))
+        if already_changed > config.min_weight_diff:
+            logger.info("Done %s%%", int(already_changed * 100.0 / requested_changes + 0.5))
 
         is_reweight_round = (round % 2 == 1 or not config.rebalance_nodes)
         if is_reweight_round:
@@ -483,12 +498,58 @@ def do_rebalance(config_dict, args):
             if abs(node.weight - coef) > min_diff:
                 active_list.append((node, coef))
 
-            already_changed += abs(change)
+            already_changed += abs(change) / max_change
 
         wait_rebalance_to_complete(True)
         round += 1
 
-    return 0
+    # ------------------- CHECK RESULTS --------------------------------------------------------------------------------
+
+    if not opts.verify:
+        return 0
+
+    logger.info("Verifying results")
+    crush, curr_reweight, crushmap_bin_f, osd_map_f = load_all_data(opts, no_cache=True)
+    failed = False
+
+    for node in crush.iter_nodes('osd'):
+        path = tuple(node.full_path)
+        if path not in expected_weight_results:
+            logger.error("Can't found osd %s in expected results", node.str_path())
+            failed = True
+            continue
+
+        if abs(expected_weight_results[path] - node.weight) > config.min_weight_diff:
+            logger.error("osd %s has wrong weight %.4f expected is %.4f",
+                         node.str_path(), node.weight, expected_weight_results[path])
+            failed = True
+        del expected_weight_results[path]
+
+    for path in expected_weight_results:
+        logger.error("osd %s missed in new crush", path)
+        failed = True
+
+    for osd_name, curr_rw in curr_reweight.items():
+        if osd_name not in expected_reweight_results:
+            logger.error("Can't found osd %s in reweight expected results", osd_name)
+            failed = True
+            continue
+
+        if abs(expected_reweight_results[osd_name] - curr_rw) > config.min_reweight_diff:
+            logger.error("osd %s has wrong reweight %.4f expected is %.4f",
+                         osd_name, curr_rw, expected_reweight_results[osd_name])
+            failed = True
+        del expected_reweight_results[osd_name]
+
+    for osd_name in expected_reweight_results:
+        logger.error("osd %s missed in new crush", osd_name)
+        failed = True
+
+    if not failed:
+        logger.info("Succesfully verifyed")
+        return 0
+
+    return 1
 
 
 help = """Gently change OSD's weight cluster in cluster.
@@ -532,8 +593,7 @@ osds:
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(usage=help)
-    parser.add_argument("-q", "--quiet", help="Don't print any info/debug messages", action='store_true')
-
+    parser.add_argument("-v", "--verify", action='store_true', help="Check cluster state after rebalance")
     parser.add_argument("-e", "--estimate-only", action='store_true',
                         help="Only estimate rebalance size (incompatible with -n/--no-estimate)")
 
@@ -548,35 +608,39 @@ def parse_args(argv):
     parser.add_argument("-p", "--pg-dump", metavar="FILE", help="Pass PG map json file from CLI")
     parser.add_argument("-t", "--osd-tree", metavar="FILE", help="Pass osd tree json file from CLI")
     parser.add_argument("-f", "--offline", action='store_true', help="Don't ask ceph cluster for any data")
+    parser.add_argument("-l", "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                        default=None, help="Console log level")
 
     parser.add_argument("config", help="Yaml rebalance config file")
-    args = parser.parse_args(argv[1:])
+    opts = parser.parse_args(argv[1:])
 
-    if args.estimate_only and args.no_estimate:
-        sys.stderr.write("-e/--estimate-only is incompatible with -n/--no-estimate\n")
-        sys.stderr.flush()
+    lconf_path = os.path.join(os.path.dirname(__file__), 'logging.json')
+    log_config = json.load(open(lconf_path))
+
+    if opts.log_level is not None:
+        log_config["handlers"]["console"]["level"] = opts.log_level
+
+    logging.config.dictConfig(log_config)
+
+    if opts.estimate_only and opts.no_estimate:
+        logger.error("-e/--estimate-only is incompatible with -n/--no-estimate\n")
         return None
 
-    if args.show_after and args.no_estimate:
-        sys.stderr.write("-s/--show-after is incompatible with -n/--no-estimate\n")
-        sys.stderr.flush()
+    if opts.show_after and opts.no_estimate:
+        logger.error("-s/--show-after is incompatible with -n/--no-estimate\n")
         return None
 
-    return args
+    return opts
 
 
 def main(argv):
-    args = parse_args(argv)
+    opts = parse_args(argv)
 
-    if not args:
+    if not opts:
         return 1
 
-    global BE_QUIET
-    if args.quiet:
-        BE_QUIET = True
-
-    cfg = yaml.load(open(args.config).read())
-    return do_rebalance(cfg, args)
+    cfg = yaml.load(open(opts.config).read())
+    return do_rebalance(cfg, opts)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,12 @@ Example:
         root: default
         host: osd-1
         weight: 0.3
+        
+      # For reweight change - be aware that osd can't have different reweight in different subtree's
+      - osd: osd.2
+        reweight: 0.95
+      - osd: osd.122
+        reweight: 0.9
 
 Estimate how many data would be moved during rebalance:
 
@@ -47,9 +53,10 @@ Run rebalance:
     
     $ python rebalance.py rebalance.yaml 
         
-        osd(name=u'osd.0', weight=0.399979, id=0) => 0.9
-        osd(name=u'osd.1', weight=0.299988, id=1) => 0.2
-        osd(name=u'osd.2', weight=0.299988, id=2) => 0.11
+        root=default/host=ceph-osd0/osd=osd.0 weight = 0.018 => 0.2
+        root=default/host=ceph-osd1/osd=osd.1 weight = 0.018 => 0.2
+        root=default/host=ceph-osd3/osd=osd.2 weight = 0.018 => 0.2
+        root=default/host=ceph-osd2/osd=osd.3 weight = 0.018 => 0.2
         Total sum of all weight changes 0.8
         Total bytes to be moved : 2.0 GiB
         Total PG to be moved  : 63

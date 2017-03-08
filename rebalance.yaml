@@ -16,7 +16,9 @@ osds:
   - osd: osd.3
     root: default
     weight: 0.2
-
+  - osd: osd.2
+    root: extra
+    weight: 0.6
 
   - osd: osd.0
     reweight: 1.0
