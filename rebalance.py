@@ -498,14 +498,17 @@ Config file example(yaml):
 # max weight change step
 step: 0.1
 
+# max reweight change step
+restep: 0.1
+
 # max OSD reweighted in parallel
-max_reweight: 1
+max_updated_nodes: 4
 
 # minimal weight difference to be corrected
 min_weight_diff: 0.01
 
-# osd selection algorithm
-osd_selection: rround
+# minimal reweight difference to be corrected
+min_reweight_diff: 0.01
 
 # list of all OSD to be rebalanced
 osds:
@@ -519,8 +522,11 @@ osds:
   # more OSD's
   - osd: osd.1
     root: default
-    host: osd-2
     weight: 0.3
+
+  # for reweight need only OSD name
+  - osd: osd.1
+    reweight: 0.95
 """
 
 
