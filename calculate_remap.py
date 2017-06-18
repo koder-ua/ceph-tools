@@ -9,7 +9,8 @@ import argparse
 import tempfile
 import collections
 
-from cephlib.common import check_output, setup_loggers, tmpnam, b2ssize
+from cephlib.common import run_locally, setup_loggers, tmpnam
+from cephlib.units import b2ssize
 from cephlib.common import logger as clogger
 
 logger = logging.getLogger("remap")
@@ -52,7 +53,7 @@ class OSDData(object):
 
 def get_pg_dump(pg_dump_js=None):
     if pg_dump_js is None:
-        pg_dump_js = check_output("ceph pg dump --format=json")
+        pg_dump_js = run_locally("ceph pg dump --format=json").decode("utf8")
 
     if isinstance(pg_dump_js, str):
         return json.loads(pg_dump_js)
@@ -184,21 +185,21 @@ def calculate_remap_crush(new_crush_f, pg_dump_f=None, osd_map_name=None):
     with tempfile.NamedTemporaryFile() as osd_map_fd:
 
         if not osd_map_name:
-            check_output("ceph osd getmap -o {0}".format(osd_map_fd.name))
+            run_locally("ceph osd getmap -o {0}".format(osd_map_fd.name))
         else:
             osd_map_name = osd_map_fd.name
 
         with tempfile.NamedTemporaryFile() as osd_map_new_fd:
             shutil.copy(osd_map_name, osd_map_new_fd.name)
-            check_output("osdmaptool --import-crush {0} {1}".format(new_crush_f, osd_map_new_fd.name))
+            run_locally("osdmaptool --import-crush {0} {1}".format(new_crush_f, osd_map_new_fd.name))
             return calculate_remap(osd_map_name, osd_map_new_fd.name, pg_dump_f=pg_dump_f)
 
 
 def calculate_remap(curr_map_f, new_map_f, pg_dump_f=None):
-    curr_distr = check_output("osdmaptool --test-map-pgs-dump {0}".format(curr_map_f))
+    curr_distr = run_locally("osdmaptool --test-map-pgs-dump {0}".format(curr_map_f)).decode("utf8")
     curr_pools = {pool.pid: pool for pool in parse(curr_distr)}
 
-    new_distr = check_output("osdmaptool --test-map-pgs-dump {0}".format(new_map_f))
+    new_distr = run_locally("osdmaptool --test-map-pgs-dump {0}".format(new_map_f)).decode("utf8")
     new_pools = {pool.pid: pool for pool in parse(new_distr)}
 
     pool_pairs = {pool.pid: (curr_pools[pool.pid], pool) for pool in new_pools.values()}
@@ -218,18 +219,18 @@ def main(argv):
         crush_map_f = tmpnam()
 
         if opts.osd_map:
-            check_output("osdmaptool --export-crush {0} {1}".format(crush_map_f, opts.osd_map))
+            run_locally("osdmaptool --export-crush {0} {1}".format(crush_map_f, opts.osd_map))
         else:
-            check_output("ceph osd getcrushmap -o {0}".format(crush_map_f))
+            run_locally("ceph osd getcrushmap -o {0}".format(crush_map_f))
 
-            check_output("crushtool -d {0} -o {1}".format(crush_map_f, opts.out_file))
+        run_locally("crushtool -d {0} -o {1}".format(crush_map_f, opts.out_file))
         return 0
 
     if opts.osd_map:
         osd_map_f = opts.osd_map
     else:
         osd_map_f = tmpnam()
-        check_output("ceph osd getmap -o {0}", osd_map_f)
+        run_locally("ceph osd getmap -o {0}".format(osd_map_f))
 
     crush_map_f = tmpnam()
 
@@ -237,15 +238,15 @@ def main(argv):
         crush_map_txt_f = opts.crush_file
     else:
         assert opts.subparser_name == "interactive"
-        check_output("osdmaptool --export-crush {0} {1}".format(crush_map_f, osd_map_f))
+        run_locally("osdmaptool --export-crush {0} {1}".format(crush_map_f, osd_map_f))
         crush_map_txt_f = tmpnam()
-        check_output("crushtool -d {0} -o {1}".format(crush_map_f, crush_map_txt_f))
-        check_output("{0} {1}".format(opts.editor, crush_map_txt_f))
+        run_locally("crushtool -d {0} -o {1}".format(crush_map_f, crush_map_txt_f))
+        run_locally("{0} {1}".format(opts.editor, crush_map_txt_f))
 
         logger.info("Press enter, when done")
         sys.stdin.readline()
 
-    check_output("crushtool -c {0} -o {1}".format(crush_map_txt_f, crush_map_f))
+    run_locally("crushtool -c {0} -o {1}".format(crush_map_txt_f, crush_map_f))
 
     if opts.osd_map:
         # don't change original osd map file
@@ -255,7 +256,7 @@ def main(argv):
     else:
         osd_map_new_f = osd_map_f
 
-    check_output("osdmaptool --import-crush {0} {1}".format(crush_map_f, osd_map_new_f))
+    run_locally("osdmaptool --import-crush {0} {1}".format(crush_map_f, osd_map_new_f))
 
     osd_changes = calculate_remap(osd_map_f, osd_map_new_f, opts.pg_dump)
 
