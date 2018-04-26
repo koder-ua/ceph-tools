@@ -205,7 +205,6 @@ def calculate_remap(curr_map_f, new_map_f, pg_dump_f=None):
     pool_pairs = {pool.pid: (curr_pools[pool.pid], pool) for pool in new_pools.values()}
     pg_dump_js = open(pg_dump_f).read() if pg_dump_f else None
     pg_sizes = get_pg_sizes(pg_dump_js)
-
     return get_osd_diff(pool_pairs, pg_sizes)
 
 
@@ -246,7 +245,11 @@ def main(argv):
         logger.info("Press enter, when done")
         sys.stdin.readline()
 
-    run_locally("crushtool -c {0} -o {1}".format(crush_map_txt_f, crush_map_f))
+    if b'\x00' in open(crush_map_f, 'rb').read(1024):
+        run_locally("crushtool -c {0} -o {1}".format(crush_map_txt_f, crush_map_f))
+    else:
+        print("Get already compiled crush map")
+        shutil.copy(crush_map_txt_f, crush_map_f)
 
     if opts.osd_map:
         # don't change original osd map file
@@ -265,8 +268,8 @@ def main(argv):
 
     for osd_id, osd_change in sorted(osd_changes.items()):
         if opts.per_osd:
-            print("{0:>3d}: Send: {1:>6d}B".format(osd_id, b2ssize(osd_change.bytes_out)))
-            print("     Recv: {0:>6d}B".format(b2ssize(osd_change.bytes_in)))
+            print("{0:>3d}: Send: {1:>6}B".format(osd_id, b2ssize(osd_change.bytes_out)))
+            print("     Recv: {0:>6}B".format(b2ssize(osd_change.bytes_in)))
             print("     PG in:  {0:>4d}".format(osd_change.pg_in))
             print("     PG out: {0:>4d}".format(osd_change.pg_out))
         total_send += osd_change.bytes_in
